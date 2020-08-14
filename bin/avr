@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# avr needs the absolute path in $0 to find its resource files
+/opt/avr3/avr $*

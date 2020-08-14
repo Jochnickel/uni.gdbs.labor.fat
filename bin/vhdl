@@ -1,0 +1,201 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+my $there = "/import/grpdrvs/ti_prak/altera/15.0/quartus/bin";
+my $here = "/opt/vhdl";
+
+
+my $rc;
+my @lines;
+
+sub do_cmd {
+  my $cmd=shift;
+  print "$cmd\n";
+  my @output = `$cmd 2>&1`;
+  $rc=$?;
+  @lines=();
+  for my $line (@output) {
+    my $emit=1;
+    my $i=0;
+    while ($emit  and  defined($_[$i])) {
+      if ($line =~ /$_[$i]/) {
+        $emit=0;
+      }
+      $i++;
+    }
+    if ($emit) {
+      push(@lines, $line);
+    }
+  }
+}
+
+# print join("", @lines);
+
+sub exit_on_rc_set {
+  if ($rc) {
+    print "make.pl stopped due to errors\n";
+    exit(1);
+  }
+}
+
+###############################################################################
+
+if ($#ARGV==0  &&  $ARGV[0] =~ /^clean$/i) {
+  do_cmd("/bin/rm -rf db incremental_db output_files simulation *.qpf main.qsf main.cdf *.vhd");
+  print join("", @lines);
+  exit_on_rc_set();
+  exit(0);
+}
+
+my $goal;
+if ($#ARGV==0) {
+  $goal=$ARGV[0];
+} else {
+  print "Which .vhdl file?\n";
+  exit(0);
+}
+
+if ($goal =~ /^(.*)\.vhdl$/) {
+  $goal=$1;
+}
+
+if (! -r "$goal.vhdl") {
+  print "File $goal.vhdl does not exist\n";
+  exit(1);
+}
+
+my @entity=`cat $here/entity.vhdl`;
+my @usercode=`cat $goal.vhdl`;
+my @usercode_copy=@usercode;
+
+my @code=();
+
+sub to_code {
+  my $listref=shift;
+  my $pattern=shift;
+
+  my $again=1;
+  do {
+    my $line=shift(@$listref);
+    push(@code, $line);
+    if ($line =~ /$pattern/) { $again=0; }
+  } while ($again);
+}
+to_code(\@entity, "user defines go here");
+my $tag1=$#code+2; # line number of first user-line in main.vhd
+to_code(\@usercode, "end declarations");
+my $tag2=$#code+1; # last line of user
+to_code(\@entity, "user defined vhdl goes here");
+my $tag3=$#code+2;   # first line of second part from user
+push(@code, @usercode);
+my $tag4=$#code+1;   # last line
+push(@code, @entity);
+if (!open(DOUT, ">main.vhd")) { print "Can not open main.vhd for writing:\n$!\n"; exit(1); }
+print DOUT join("", @code);
+close(DOUT);
+
+print "\e[H\e[2J\n";
+
+`echo source $here/DE0_Nano.qsf > main.qsf`;
+`echo set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files >> main.qsf`;
+`echo set_global_assignment -name SYNTHESIS_EFFORT FAST >> main.qsf`;
+`echo set_global_assignment -name TOP_LEVEL_ENTITY main >> main.qsf`;
+`echo set_global_assignment -name SOURCE_FILE main.vhd >> main.qsf`;
+#`echo set_global_assignment -name SOURCE_FILE prescaler.vhd >> main.qsf`;
+#`echo set_global_assignment -name SOURCE_FILE codemem.vhd >> main.qsf`;
+
+my @suppress_always=('^    Info:',                 # fit, map, asm, pgm
+                     '^Inconsistency detected',    # fit, map, asm, pgm
+                     '^Info: \*\*\*',              # fit, map, asm, pgm
+                     '^Info: Running Quartus II',  # fit, map, asm, pgm
+                     '^Info: Command: ',           # fit, map, asm, pgm
+                    );
+
+# --generate_cmp_file=main.vhd
+# --generate_inc_file=main.vhd
+# --generate_inst_file=main.vhd
+# --generate_symbol=main.vhd
+do_cmd("$there/quartus_map main --write_settings_file=off",
+       @suppress_always, '12021', '12022', '12023', '^Warning \(20028\):',
+       '15610.*No output dependent on input pin "p_in\[',
+       '13410.*Pin "p_out\[.*is stuck at GND',
+       '13410.*Pin "p_out\[.*is stuck at GND',
+       '13034',
+       '13035.*Inserted always-enabled tri-state buffer between "led\[',
+       '13009', '13010', # permamnently enabled tri-state buffers
+       '13024.*Output pins are stuck at VCC or GND',
+       '21074.*Design contains.*input pin.s. that do not drive logic',
+       '10873.*Using initial value X.*for net "p_out\[',
+      );
+if ($rc) { # translate errors into readable form
+  my $had_something=0;
+  for my $line (@lines) {
+    if ($line =~ / Line: (\d+)$/) {
+      my $linenumber=$1;
+      if ($tag1<=$linenumber and $linenumber<=$tag2) {
+        $had_something=1;
+        print $line;
+        my $lin=$linenumber-$tag1+1;
+        print "$goal.vhdl:$lin: $usercode_copy[$lin-1]";
+      } elsif ($tag3<=$linenumber and $linenumber<=$tag4) {
+        $had_something=1;
+        print $line;
+        my $lin=$linenumber-$tag3+1+($tag2-$tag1+1);
+        print "$goal.vhdl:$lin: $usercode_copy[$lin-1]";
+      }
+
+#      print $line;
+#      print `tail -n +$linenumber main.vhd | head -1`;
+#      print "\n";
+    }
+  }
+  if ($had_something) {
+    exit_on_rc_set(); # will always exit
+  }
+}
+print join("", @lines);
+exit_on_rc_set();
+
+print "\n\n\n";
+
+do_cmd("$there/quartus_fit main --write_settings_file=off",
+       @suppress_always, '33400[34]', 'operations beginning', 'operations ending', '14896',
+       '17020[01]', '11888', '17623[35]', '21077', '292013', '17644[45]',
+       '^Info: qfit2', '^Info: Project  =', '^Info: Revision =', '^Warning \(20028\):',
+       '16912[45]',
+       '15706',      # unused pin definition warnings
+       '169177', '169178', # "using 3v3 pin specifications" for all input pins
+       '169065.*Pin led\[', # info "permanently enabled output enable"
+      );
+print join("", @lines);
+exit_on_rc_set();
+
+print "\n\n\n";
+
+do_cmd("$there/quartus_asm main --write_settings_file=off", @suppress_always, '115031');
+print join("", @lines);
+exit_on_rc_set();
+
+print "\n\n\n";
+
+`start_jtagd`;
+sleep(1);
+
+`echo 'JedecChain;' > main.cdf`;
+`echo '	FileRevision(JESD32A);' >> main.cdf`;
+`echo '	DefaultMfr(6E);' >> main.cdf`;
+`echo '	P ActionCode(Cfg)' >> main.cdf`;
+`echo '		Device PartName(EP4CE22F17) Path("output_files/") File("main.sof") MfrSpec(OpMask(1));' >> main.cdf`;
+`echo 'ChainEnd;' >> main.cdf`;
+
+`echo 'AlteraBegin;' >> main.cdf`;
+`echo '	ChainType(JTAG);' >> main.cdf`;
+`echo 'AlteraEnd;' >> main.cdf`;
+
+# use "quartus_pgm -l" to find programmer (attached)
+do_cmd("$there/quartus_pgm main.cdf", @suppress_always, '20906[01]');
+print join("", @lines);
+exit_on_rc_set();
+
+exit(0);
